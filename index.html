@@ -182,7 +182,7 @@
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<meta name="runlog-ocr-build" content="2026-08-23-v4">
+<meta name="runlog-ocr-build" content="2026-08-23-v6">
 </head>
 <body>
 <div class="app-shell">
@@ -317,6 +317,7 @@
   const dropzone = $('dropzone'), fileInput = $('fileInput'), previewArea = $('previewArea'), previewImg = $('previewImg');
   const clearBtn = $('clearBtn'), scanLine = $('scanLine'), analyzingTag = $('analyzingTag'), errorTag = $('errorTag');
   const confirmBlock = $('confirmBlock');
+  const ocrRetryBtn = $('ocrRetryBtn');
   const inDistance = $('inDistance'), inPace = $('inPace'), inHr = $('inHr'), inDuration = $('inDuration'), inDate = $('inDate');
   const inCalories = $('inCalories'), inSteps = $('inSteps'), inElevation = $('inElevation'), inAerobic = $('inAerobic'), inAzm = $('inAzm'), inMemo = $('inMemo');
   const saveBtn = $('saveBtn'), cancelBtn = $('cancelBtn');
@@ -584,6 +585,7 @@
     reader.readAsDataURL(file);
   }
 
+  ocrRetryBtn && ocrRetryBtn.addEventListener('click', analyzeImage);
   clearBtn.addEventListener('click', resetCapture);
   cancelBtn.addEventListener('click', resetCapture);
   function resetCapture(){
@@ -605,7 +607,8 @@
 
       // Fully client-side OCR. No API key and no image upload to an AI service.
       // Explicit paths make Android Chrome/PWA worker loading more reliable.
-      const worker = await Tesseract.createWorker('eng', 1, {
+      const worker = await Promise.race([
+        Tesseract.createWorker('eng', 1, {
         workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
         langPath: 'https://tessdata.projectnaptha.com/4.0.0',
         corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0',
@@ -616,7 +619,9 @@
             analyzingTag.innerHTML = `<span class="spinner"></span>${m.status}`;
           }
         }
-      });
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('OCRエンジンの読み込みがタイムアウトしました')), 30000))
+      ]);
 
       // Prepare a high-contrast enlarged image. This is especially helpful for
       // dark running-app screenshots with white digits.
@@ -703,13 +708,15 @@
       confirmBlock.classList.add('show');
     }catch(err){
       console.error('RUNLOG OCR error:', err);
-      errorTag.textContent = 'OCRの読み取りに失敗しました。もう一度試すか、数値を手入力してください。';
+      errorTag.textContent = 'OCRの読み取りに失敗しました。ネット接続を確認して「もう一度OCRする」を押してください。';
+      if(ocrRetryBtn) ocrRetryBtn.style.display = 'block';
       errorTag.style.display = 'block';
       [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
       inDate.value = todayStr();
       confirmBlock.classList.add('show');
     }finally{
       analyzingTag.style.display = 'none'; scanLine.style.display = 'none';
+      if(ocrRetryBtn) ocrRetryBtn.style.display = 'none';
     }
   }
 
