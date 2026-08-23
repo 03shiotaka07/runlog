@@ -182,8 +182,7 @@
 
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<meta name="runlog-ocr-build" content="2026-08-23-v10-multi-pass">
+<meta name="runlog-build" content="2026-08-23-v11-manual-entry">
 </head>
 <body>
 <div class="app-shell">
@@ -217,7 +216,7 @@
       </div>
 
       <div class="panel">
-        <div class="panel-title"><span class="dot"></span>画像から記録を読み取る</div>
+        <div class="panel-title"><span class="dot"></span>画像を見ながら記録する</div>
 
         <label id="dropzone" class="dropzone" for="fileInput">
           <input type="file" id="fileInput" accept="image/*" aria-label="画像を選択">
@@ -238,13 +237,13 @@
             <div id="scanLine" class="scan-overlay" style="display:none;"></div>
             <button class="clear-btn" id="clearBtn">✕ やり直す</button>
           </div>
-          <div class="preview-note">アップロードした画像は、切り取らずに全体を表示しています。</div>
-          <div id="analyzingTag" class="analyzing-tag" style="display:none;"><div class="spinner"></div> 画像を解析しています…</div>
+          <div class="preview-note">アップロードした画像を見ながら、下の項目を手入力してください。</div>
+          <div id="analyzingTag" class="analyzing-tag" style="display:none;"></div>
           <div id="errorTag" class="error-tag" style="display:none;"></div>
         </div>
 
         <div class="confirm" id="confirmBlock">
-          <div class="confirm-note">読み取った内容を確認・修正してから記録してください。</div>
+          <div class="confirm-note">画像を確認しながら、必要な項目を手入力して記録してください。<br><strong>OCRは使わず、入力した値をそのまま保存します。</strong></div>
           <div class="field-row">
             <div class="field dist"><label>距離 (km)</label><input type="number" step="0.01" id="inDistance" placeholder="例: 4.93"></div>
             <div class="field pace"><label>平均ペース (/km)</label><input type="text" id="inPace" placeholder="例: 7'34&quot;"></div>
@@ -580,14 +579,18 @@
       previewImg.src = dataUrl;
       dropzone.style.display = 'none';
       previewArea.style.display = 'block';
-      confirmBlock.classList.remove('show');
       errorTag.style.display = 'none';
-      analyzeImage();
+      analyzingTag.style.display = 'none';
+      scanLine.style.display = 'none';
+      // v11: OCRを完全に廃止。画像を見ながら手入力する方式。
+      [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
+      inDate.value = todayStr();
+      confirmBlock.classList.add('show');
+      inDistance.focus();
     };
     reader.readAsDataURL(file);
   }
 
-  ocrRetryBtn && ocrRetryBtn.addEventListener('click', analyzeImage);
   clearBtn.addEventListener('click', resetCapture);
   cancelBtn.addEventListener('click', resetCapture);
   function resetCapture(){
