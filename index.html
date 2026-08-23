@@ -185,6 +185,20 @@
   .month-extra{ display:flex; flex-wrap:wrap; gap:8px 14px; padding:0 4px 14px; font-size:10.5px; color:var(--ink-faint); font-family:var(--font-mono); }
 
   ::selection{ background:rgba(86,224,194,0.3); }
+
+  .ai-settings-btn{border:1px solid var(--line);background:var(--surface);color:var(--ink-dim);border-radius:10px;padding:8px 10px;font-family:var(--font-display);font-size:11px;cursor:pointer;}
+  .ai-settings-btn.active{color:var(--trace);border-color:var(--trace);}
+  .modal-backdrop{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.72);display:none;align-items:flex-end;justify-content:center;padding:16px;}
+  .modal-backdrop.show{display:flex;}
+  .settings-modal{width:min(480px,100%);background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.45);}
+  .settings-title{font-weight:800;font-size:16px;margin-bottom:8px;}
+  .settings-note{font-size:12px;color:var(--ink-dim);line-height:1.7;margin-bottom:14px;}
+  .settings-note strong{color:var(--ink);}
+  .api-key-input{width:100%;border:1px solid var(--line);background:var(--surface-2);color:var(--ink);border-radius:10px;padding:12px;font-family:var(--font-mono);font-size:12px;outline:none;}
+  .api-key-input:focus{border-color:var(--trace);}
+  .settings-actions{display:flex;gap:8px;margin-top:12px;}
+  .settings-actions button{flex:1;}
+  .settings-status{margin-top:10px;font-size:11px;color:var(--ink-dim);min-height:16px;}
 </style>
 </head>
 <body>
@@ -195,6 +209,7 @@
       <div class="brand">RUN<span>LOG</span></div>
       <div class="screen-title" id="screenTitle">ホーム</div>
     </div>
+    <button class="ai-settings-btn" id="aiSettingsBtn" type="button">⚙ AI設定</button>
   </div>
 
   <div class="screens">
@@ -329,8 +344,16 @@
   const sumDistance = $('sumDistance'), sumPace = $('sumPace'), sumHr = $('sumHr'), watchFoot = $('watchFoot');
   const sumCalories = $('sumCalories'), sumSteps = $('sumSteps'), sumElevation = $('sumElevation'), sumRuns = $('sumRuns');
   const screenTitle = $('screenTitle');
+  const aiSettingsBtn = $('aiSettingsBtn');
+  const aiSettingsModal = $('aiSettingsModal');
+  const apiKeyInput = $('apiKeyInput');
+  const saveApiKeyBtn = $('saveApiKeyBtn');
+  const clearApiKeyBtn = $('clearApiKeyBtn');
+  const closeApiKeyBtn = $('closeApiKeyBtn');
+  const apiKeyStatus = $('apiKeyStatus');
 
   const STORAGE_KEY = 'runlog:records';
+  const API_KEY_STORAGE = 'runlog:anthropicApiKey';
   let records = [];
 
   // ---------- tab navigation ----------
@@ -554,6 +577,27 @@
     if(btn) deleteRecord(Number(btn.dataset.id));
   });
 
+  // ---------- AI settings ----------
+  function getApiKey(){ return (localStorage.getItem(API_KEY_STORAGE) || '').trim(); }
+  function updateApiKeyStatus(){
+    const hasKey=!!getApiKey();
+    apiKeyStatus.textContent=hasKey ? 'APIキーはこの端末に保存されています。' : 'APIキーは未設定です。';
+    aiSettingsBtn.classList.toggle('active',hasKey);
+  }
+  function openApiSettings(){ apiKeyInput.value=getApiKey(); updateApiKeyStatus(); aiSettingsModal.classList.add('show'); setTimeout(()=>apiKeyInput.focus(),50); }
+  function closeApiSettings(){ aiSettingsModal.classList.remove('show'); }
+  aiSettingsBtn.addEventListener('click',openApiSettings);
+  closeApiKeyBtn.addEventListener('click',closeApiSettings);
+  aiSettingsModal.addEventListener('click',e=>{if(e.target===aiSettingsModal) closeApiSettings();});
+  saveApiKeyBtn.addEventListener('click',()=>{
+    const key=apiKeyInput.value.trim();
+    if(key) localStorage.setItem(API_KEY_STORAGE,key); else localStorage.removeItem(API_KEY_STORAGE);
+    updateApiKeyStatus();
+    apiKeyStatus.textContent=key ? 'APIキーを保存しました。' : 'APIキーを削除しました。';
+  });
+  clearApiKeyBtn.addEventListener('click',()=>{localStorage.removeItem(API_KEY_STORAGE);apiKeyInput.value='';updateApiKeyStatus();});
+  updateApiKeyStatus();
+
   // ---------- image capture ----------
   let currentBase64 = null, currentMediaType = null;
 
@@ -620,9 +664,17 @@
 出力は次のJSON形式のみとし、他の説明文やMarkdown記法は一切含めないでください:
 {"distance_km": number|null, "duration_sec": number|null, "pace": string|null, "heart_rate": number|null, "calories": number|null, "steps": number|null, "elevation_gain_m": number|null, "aerobic_load": number|null, "active_zone_min": number|null}`;
 
+      const apiKey = getApiKey();
+      if(!apiKey) throw new Error('API_KEY_MISSING');
+
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
           max_tokens: 1000,
@@ -635,7 +687,13 @@
           }]
         })
       });
-      if(!response.ok) throw new Error('APIリクエストに失敗しました');
+      if(!response.ok){
+        let detail='';
+        try{ const errData=await response.json(); detail=errData?.error?.message || ''; }catch(e){}
+        if(response.status===401) throw new Error('API_KEY_INVALID');
+        if(response.status===403) throw new Error('BROWSER_ACCESS_BLOCKED');
+        throw new Error(detail || ('API_HTTP_'+response.status));
+      }
 
       const data = await response.json();
       const textBlock = (data.content || []).find(b => b.type === 'text');
@@ -660,7 +718,12 @@
 
       confirmBlock.classList.add('show');
     }catch(err){
-      errorTag.textContent = '読み取りに失敗しました。数値を手入力するか、別の画像でお試しください。';
+      let msg='読み取りに失敗しました。';
+      if(err?.message==='API_KEY_MISSING') msg='AI画像読み取りにはAPIキーが必要です。右上の「⚙ AI設定」から設定してください。';
+      else if(err?.message==='API_KEY_INVALID') msg='APIキーが正しくないか、利用できないキーです。AI設定から確認してください。';
+      else if(err?.message==='BROWSER_ACCESS_BLOCKED') msg='Anthropic側でブラウザからのAPI利用が許可されていません。API設定を確認してください。';
+      else if(err?.message) msg='読み取りに失敗しました。'+err.message;
+      errorTag.textContent = msg;
       errorTag.style.display = 'block';
       [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
       inDate.value = todayStr();
@@ -705,5 +768,19 @@
   }
 })();
 </script>
+
+<div class="modal-backdrop" id="aiSettingsModal">
+  <div class="settings-modal" role="dialog" aria-modal="true">
+    <div class="settings-title">AI画像読み取り設定</div>
+    <div class="settings-note">画像の読み取りにはAnthropic APIキーが必要です。<br><strong>キーはGitHubには保存せず、この端末のブラウザ内だけに保存します。</strong><br>キーを他人に見せたり、公開リポジトリへ貼り付けたりしないでください。</div>
+    <input class="api-key-input" id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-ant-...">
+    <div class="settings-actions">
+      <button class="btn btn-primary" id="saveApiKeyBtn" type="button">保存</button>
+      <button class="btn btn-ghost" id="clearApiKeyBtn" type="button">キーを削除</button>
+      <button class="btn btn-ghost" id="closeApiKeyBtn" type="button">閉じる</button>
+    </div>
+    <div class="settings-status" id="apiKeyStatus"></div>
+  </div>
+</div>
 </body>
 </html>
