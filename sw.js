@@ -1,4 +1,4 @@
-const CACHE_NAME = "runlog-v2";
+const CACHE_NAME = 'runlog-v3';
 const APP_SHELL = [
   "./",
   "./index.html",
