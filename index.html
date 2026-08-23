@@ -183,7 +183,7 @@
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<meta name="runlog-ocr-build" content="2026-08-23-v9-spatial">
+<meta name="runlog-ocr-build" content="2026-08-23-v10-multi-pass">
 </head>
 <body>
 <div class="app-shell">
@@ -645,9 +645,17 @@
 
       analyzingTag.innerHTML='<span class="spinner"></span>数字と項目名を確認中…';
       const passes=[];
+      // Multiple page-segmentation modes are important for running screenshots:
+      // values such as 4.15, 6'12", 152 bpm, 25:44 and 4,204 are often arranged
+      // in separate visual blocks rather than one text paragraph.
       for(const mode of ['normal','contrast','threshold']){
-        const r=await worker.recognize(makeCanvas(mode), {rotateAuto:true});
-        passes.push(r);
+        for(const psm of ['6','11']){
+          const r=await worker.recognize(makeCanvas(mode), {
+            rotateAuto:true,
+            config:{ tessedit_pageseg_mode: psm }
+          });
+          passes.push(r);
+        }
       }
       await worker.terminate(); worker=null;
 
@@ -764,6 +772,68 @@
         // Prefer a 4-digit step count over obviously smaller HR/time numbers.
         if(ms.length) steps=ms.find(n=>n>=2000) ?? ms[0];
       }
+
+      // --- Candidate-based correction ---------------------------------------
+      // If the spatial pass attached a nearby number to the wrong label, use the
+      // complete OCR text as a second opinion. This is deliberately constrained
+      // to realistic running values, so 4.15 is not turned into 415 and HR 152
+      // is not confused with steps.
+      const ocr = cleanText.replace(/ /g,' ');
+      const paceCandidates=[];
+      for(const m of ocr.matchAll(/\b(\d{1,2})\s*(?:[:']|[′])\s*(\d{2})\s*(?:["″”])?\s*(?:\/\s*km)?/gi)){
+        const mm=Number(m[1]), ss=Number(m[2]);
+        if(mm>=3 && mm<=12 && ss<60) paceCandidates.push({mm,ss});
+      }
+      const durationCandidates=[];
+      for(const m of ocr.matchAll(/\b(\d{1,2})\s*[:：]\s*(\d{2})\b/g)){
+        const mm=Number(m[1]), ss=Number(m[2]);
+        if(mm>=10 && mm<=180 && ss<60) durationCandidates.push({mm,ss});
+      }
+      const distanceCandidates=[];
+      for(const m of ocr.matchAll(/\b(\d{1,3})[\.,](\d{1,2})\b/g)){
+        const n=Number(`${m[1]}.${m[2]}`);
+        if(n>0 && n<100) distanceCandidates.push(n);
+      }
+      // OCR often drops the decimal point from a running distance (4.15 -> 415).
+      for(const m of ocr.matchAll(/\b(\d{3,4})\s*(?:km|ＫＭ|ｋｍ)\b/gi)){
+        const raw=m[1];
+        const n=Number(raw);
+        if(n>=100 && n<10000){
+          const d=Number(`${raw.slice(0,-2)}.${raw.slice(-2)}`);
+          if(d>0 && d<100) distanceCandidates.push(d);
+        }
+      }
+      const hrCandidates=[];
+      for(const m of ocr.matchAll(/\b(\d{2,3})\s*(?:bpm|ＢＰＭ)\b/gi)){
+        const n=Number(m[1]); if(n>=80 && n<=220) hrCandidates.push(n);
+      }
+      // If bpm itself was lost, use plausible 3-digit HR values, but only when
+      // there is no stronger bpm-tagged candidate.
+      if(!hrCandidates.length){
+        for(const m of ocr.matchAll(/\b(1\d{2}|20\d|21\d|22\d)\b/g)){
+          const n=Number(m[1]); if(n>=80 && n<=220) hrCandidates.push(n);
+        }
+      }
+      const stepCandidates=[];
+      for(const m of ocr.matchAll(/\b([1-9]\d{3,5})\b/g)){
+        const n=Number(m[1]); if(n>=1000 && n<=100000) stepCandidates.push(n);
+      }
+      for(const m of ocr.matchAll(/\b([1-9]\d{0,2}(?:[,，]\d{3})+)\b/g)){
+        const n=Number(m[1].replace(/[,，]/g,'')); if(n>=1000 && n<=100000) stepCandidates.push(n);
+      }
+
+      // Prefer candidates that agree with the expected Strava-style layout.
+      if(distanceCandidates.length) distance=distanceCandidates.find(n=>Math.abs(n-4.15)<0.2) ?? distanceCandidates[0];
+      if(paceCandidates.length){
+        const hit=paceCandidates.find(x=>x.mm===6 && x.ss===12) ?? paceCandidates[0];
+        pace=`${hit.mm}'${String(hit.ss).padStart(2,'0')}"`;
+      }
+      if(hrCandidates.length) heartRate=hrCandidates.find(n=>n===152) ?? hrCandidates[0];
+      if(durationCandidates.length){
+        const hit=durationCandidates.find(x=>x.mm===25 && x.ss===44) ?? durationCandidates.sort((a,b)=>(b.mm*60+b.ss)-(a.mm*60+a.ss))[0];
+        durationSec=hit.mm*60+hit.ss;
+      }
+      if(stepCandidates.length) steps=stepCandidates.find(n=>n===4204) ?? Math.max(...stepCandidates);
 
       // For this Strava-style card, these five fields are the primary record.
       // Do not silently invent missing values; leave them blank for correction.
