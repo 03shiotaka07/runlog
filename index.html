@@ -113,7 +113,7 @@
   .dz-sub{ font-size:11px; color:var(--ink-dim); margin-top:4px; }
 
   .preview-wrap{ position:relative; border-radius:14px; overflow:hidden; }
-  .preview-wrap img{ width:100%; display:block; max-height:200px; object-fit:cover; }
+  .preview-wrap img{ width:100%; display:block; max-height:min(70vh, 720px); height:auto; object-fit:contain; background:#05070d; }
   .preview-wrap .clear-btn{ position:absolute; top:8px; right:8px; background:rgba(10,15,26,0.75); color:var(--ink); border:1px solid var(--line); border-radius:8px; font-size:11px; padding:5px 9px; cursor:pointer; }
   .scan-overlay{ position:absolute; left:0; right:0; height:2px; background:linear-gradient(90deg, transparent, var(--trace), transparent); animation: scan 1.6s linear infinite; box-shadow:0 0 12px var(--trace); }
   @keyframes scan{ 0%{ top:0; } 100%{ top:100%; } }
@@ -121,6 +121,7 @@
   .spinner{ width:12px; height:12px; border-radius:50%; border:2px solid rgba(86,224,194,0.25); border-top-color:var(--trace); animation:spin 0.8s linear infinite; }
   @keyframes spin{ to{ transform:rotate(360deg); } }
   .error-tag{ margin-top:10px; font-size:12px; color:var(--pulse); background:rgba(255,93,93,0.08); border:1px solid rgba(255,93,93,0.25); padding:8px 10px; border-radius:8px; }
+  .preview-note{ margin-top:7px; font-size:10px; color:var(--ink-dim); text-align:center; }
 
   .confirm{ margin-top:14px; display:none; }
   .confirm.show{ display:block; }
@@ -182,7 +183,7 @@
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<meta name="runlog-ocr-build" content="2026-08-23-v6">
+<meta name="runlog-ocr-build" content="2026-08-23-v7">
 </head>
 <body>
 <div class="app-shell">
@@ -237,6 +238,7 @@
             <div id="scanLine" class="scan-overlay" style="display:none;"></div>
             <button class="clear-btn" id="clearBtn">✕ やり直す</button>
           </div>
+          <div class="preview-note">アップロードした画像は、切り取らずに全体を表示しています。</div>
           <div id="analyzingTag" class="analyzing-tag" style="display:none;"><div class="spinner"></div> 画像を解析しています…</div>
           <div id="errorTag" class="error-tag" style="display:none;"></div>
         </div>
