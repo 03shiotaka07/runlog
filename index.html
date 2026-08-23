@@ -183,7 +183,7 @@
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<meta name="runlog-ocr-build" content="2026-08-23-v7">
+<meta name="runlog-ocr-build" content="2026-08-23-v8-accurate">
 </head>
 <body>
 <div class="app-shell">
@@ -602,123 +602,144 @@
     errorTag.style.display = 'none'; confirmBlock.classList.remove('show');
     analyzingTag.innerHTML = '<span class="spinner"></span>OCRエンジンを準備中…';
 
+    let worker = null;
     try{
-      if(!window.Tesseract || typeof Tesseract.createWorker !== 'function'){
-        throw new Error('OCRライブラリを読み込めませんでした');
-      }
+      if(!window.Tesseract || typeof Tesseract.createWorker !== 'function') throw new Error('OCRライブラリを読み込めませんでした');
 
-      // Fully client-side OCR. No API key and no image upload to an AI service.
-      // Explicit paths make Android Chrome/PWA worker loading more reliable.
-      const worker = await Promise.race([
-        Tesseract.createWorker('eng', 1, {
-        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0',
-        logger: m => {
-          if(m && m.status === 'recognizing text' && typeof m.progress === 'number'){
-            analyzingTag.innerHTML = `<span class="spinner"></span>画像を読み取り中… ${Math.round(m.progress*100)}%`;
-          } else if(m && m.status){
-            analyzingTag.innerHTML = `<span class="spinner"></span>${m.status}`;
+      // Japanese + English: running screenshots commonly use Japanese labels.
+      // Everything is processed locally in the browser; no API key is required.
+      worker = await Promise.race([
+        Tesseract.createWorker('jpn+eng', 1, {
+          workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0',
+          logger: m => {
+            if(m && m.status === 'recognizing text' && typeof m.progress === 'number'){
+              analyzingTag.innerHTML = `<span class="spinner"></span>画像を読み取り中… ${Math.round(m.progress*100)}%`;
+            } else if(m && m.status){
+              analyzingTag.innerHTML = `<span class="spinner"></span>${m.status}`;
+            }
           }
-        }
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('OCRエンジンの読み込みがタイムアウトしました')), 30000))
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('OCRエンジンの読み込みがタイムアウトしました')), 45000))
       ]);
 
-      // Prepare a high-contrast enlarged image. This is especially helpful for
-      // dark running-app screenshots with white digits.
-      const canvas = document.createElement('canvas');
       const img = new Image();
-      await new Promise((resolve,reject)=>{
-        img.onload=resolve; img.onerror=reject; img.src=previewImg.src;
-      });
-      const scale = Math.min(2.5, Math.max(1.5, 1800 / Math.max(img.width,1)));
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext('2d', {willReadFrequently:true});
-      ctx.drawImage(img,0,0,canvas.width,canvas.height);
-      const pixels = ctx.getImageData(0,0,canvas.width,canvas.height);
-      for(let i=0;i<pixels.data.length;i+=4){
-        const r=pixels.data[i], g=pixels.data[i+1], b=pixels.data[i+2];
-        const y=0.299*r+0.587*g+0.114*b;
-        const v = y > 150 ? 255 : 0;
-        pixels.data[i]=pixels.data[i+1]=pixels.data[i+2]=v;
-      }
-      ctx.putImageData(pixels,0,0);
+      await new Promise((resolve,reject)=>{ img.onload=resolve; img.onerror=reject; img.src=previewImg.src; });
 
-      analyzingTag.innerHTML = '<span class="spinner"></span>数字を解析中…';
-      const ret = await worker.recognize(canvas, {rotateAuto:true});
-      await worker.terminate();
-      const text = (ret && ret.data && ret.data.text) ? ret.data.text : '';
-      if(!text.trim()) throw new Error('OCR結果が空でした');
+      // Keep the original contrast. The old hard black/white threshold erased
+      // decimal points and commas (e.g. 4.15 -> 415), so we now use two passes.
+      const scale = Math.min(3, Math.max(1.8, 2200 / Math.max(img.width,1)));
+      const makeCanvas = (threshold=false) => {
+        const c=document.createElement('canvas');
+        c.width=Math.round(img.width*scale); c.height=Math.round(img.height*scale);
+        const x=c.getContext('2d',{willReadFrequently:true});
+        x.imageSmoothingEnabled=true; x.drawImage(img,0,0,c.width,c.height);
+        if(threshold){
+          const d=x.getImageData(0,0,c.width,c.height);
+          for(let i=0;i<d.data.length;i+=4){
+            const y=0.299*d.data[i]+0.587*d.data[i+1]+0.114*d.data[i+2];
+            const v=y>115?255:0; d.data[i]=d.data[i+1]=d.data[i+2]=v;
+          }
+          x.putImageData(d,0,0);
+        }
+        return c;
+      };
 
-      // Keep the raw OCR text hidden; parse the common running metrics.
-      const clean = text.replace(/[，、]/g, ',').replace(/[：]/g, ':').replace(/[’‘′]/g, "'").replace(/[″”]/g,'"');
+      analyzingTag.innerHTML='<span class="spinner"></span>数字と項目名を確認中…';
+      const pass1 = await worker.recognize(makeCanvas(false), {rotateAuto:true});
+      const text1 = pass1?.data?.text || '';
+      // A second high-contrast pass helps dark screenshots while the first pass
+      // preserves punctuation such as decimal points and commas.
+      const pass2 = await worker.recognize(makeCanvas(true), {rotateAuto:true});
+      const text2 = pass2?.data?.text || '';
+      await worker.terminate(); worker=null;
+
+      const rawText = [text1,text2].filter(Boolean).join('\n');
+      if(!rawText.trim()) throw new Error('OCR結果が空でした');
+      const clean = rawText
+        .replace(/[，、]/g, ',').replace(/[：]/g, ':')
+        .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"')
+        .replace(/[‐‑–—]/g,'-');
+
       const num = s => Number(String(s).replace(/,/g,''));
-      let m;
+      const norm = s => String(s).replace(/[,，]/g,'').trim();
+      const labeled = (labels, pattern, source=clean) => {
+        const re = new RegExp(`(?:${labels})(?:[^0-9]{0,80})(${pattern})`, 'iu');
+        const m=source.match(re); return m?m[1]:null;
+      };
+      const labeledEither = (labels, pattern, source=clean) => {
+        let v=labeled(labels,pattern,source);
+        if(v) return v;
+        const re = new RegExp(`(${pattern})(?:[^0-9]{0,80})(?:${labels})`, 'iu');
+        const m=source.match(re); return m?m[1]:null;
+      };
 
-      // Distance: e.g. 10.16 km. Also tolerate OCR reading km as kM/Km.
-      m = clean.match(/(\d+(?:\.\d+)?)\s*k\s*m/i);
-      const distance = m ? num(m[1]) : null;
+      // Distance: preserve decimals. If OCR drops the decimal point, recover it
+      // only when the value is clearly a 3- or 4-digit distance candidate.
+      let dv=labeledEither('距離|総距離|distance', '(\\d+(?:\\.\\d+)?)\\s*(?:km|ＫＭ|ｋｍ)?');
+      let distance = dv ? num(dv) : null;
+      if(distance!=null && distance>=100 && distance<10000) distance=Math.round((distance/100)*100)/100;
+      if(distance==null){
+        const m=clean.match(/(\d+(?:\.\d+)?)\s*(?:km|ＫＭ|ｋｍ)/i);
+        if(m) distance=num(m[1]);
+      }
 
-      // Pace: e.g. 5:32 or 5'32". Prefer a line containing pace-like text.
-      m = clean.match(/(?:pace|ペース)[^\d]{0,30}(\d{1,2})\s*[:']\s*(\d{2})/i);
-      if(!m) m = clean.match(/\b(\d{1,2})\s*[:']\s*(\d{2})\s*(?:\"|”)?\s*\/\s*k\s*m/i);
-      const pace = m ? `${m[1]}'${m[2]}"` : null;
+      // Pace: prefer a value next to a pace label, otherwise a mm:ss-like value.
+      let pv=labeledEither('平均\\s*ペース|ペース|pace', '(\\d{1,2})\\s*[:\']\\s*(\\d{2})');
+      if(!pv){
+        const m=clean.match(/(\d{1,2})\s*[:\']\s*(\d{2})\s*(?:"|”)?\s*(?:\/\s*(?:km|ＫＭ|ｋｍ))?/i);
+        pv=m?`${m[1]}:${m[2]}`:null;
+      }
+      const pace = pv ? (pv.includes(':') ? pv.replace(':',"'")+`"` : pv) : null;
 
-      // Duration: HH:MM:SS or MM:SS. Ignore pace-like values unless a duration label is present.
-      m = clean.match(/(?:duration|time)[^\d]{0,20}(\d{1,2}):(\d{2})(?::(\d{2}))?/i);
-      let durationSec = null;
-      if(m) durationSec = m[3] ? num(m[1])*3600+num(m[2])*60+num(m[3]) : num(m[1])*60+num(m[2]);
+      // Duration: require a time label where possible so pace isn't mistaken for time.
+      let tv=labeledEither('時間|duration|time', '(\\d{1,2}):\\s*(\\d{2})(?::\\s*(\\d{2}))?');
+      let durationSec=null;
+      if(tv){ const a=tv.split(':').map(Number); durationSec=a.length===3?a[0]*3600+a[1]*60+a[2]:a[0]*60+a[1]; }
 
-      // Heart rate, calories, steps, elevation. Labels are mainly English after
-      // OCR because these fields are numeric; Japanese labels can be entered manually.
-      m = clean.match(/(?:heart\s*rate|bpm)[^\d]{0,20}(\d{2,3})/i) || clean.match(/(\d{2,3})\s*bpm/i);
-      const heartRate = m ? num(m[1]) : null;
-      m = clean.match(/(?:calories|kcal)[^\d]{0,20}(\d{2,5})/i) || clean.match(/(\d{2,5})\s*kcal/i);
-      const calories = m ? num(m[1]) : null;
-      m = clean.match(/(?:steps)[^\d]{0,20}([\d,]{3,7})/i);
-      const steps = m ? num(m[1]) : null;
-      m = clean.match(/(?:elevation)[^\d]{0,20}(\d{1,5})/i);
-      const elevation = m ? num(m[1]) : null;
+      // Numeric fields use their Japanese/English labels first. This prevents a
+      // heart-rate number from being mistaken for calories or steps.
+      let hv=labeledEither('平均\\s*心拍数|心拍数|heart\\s*rate|bpm','(\\d{2,3})');
+      let heartRate=hv?num(hv):null;
+      let cv=labeledEither('消費\\s*カロリー|カロリー|calories|kcal','([\\d,]{2,6})');
+      let calories=cv?num(cv):null;
+      let sv=labeledEither('歩数|総歩数|steps','([\\d,]{3,8})');
+      let steps=sv?num(sv):null;
+      let ev=labeledEither('獲得\\s*標高|標高|elevation','([\\d,]{1,6})');
+      let elevation=ev?num(ev):null;
 
-      // If labels were OCR'd as Japanese, use the visible text as a second pass.
-      const raw = text.replace(/[，、]/g, ',').replace(/[：]/g, ':');
-      let d2 = raw.match(/(\d+(?:\.\d+)?)\s*(?:km|ＫＭ|ｋｍ)/i); const distance2=d2?num(d2[1]):null;
-      let p2 = raw.match(/(\d{1,2})\s*[:']\s*(\d{2})/); const pace2=p2?`${p2[1]}'${p2[2]}"`:null;
-      let h2 = raw.match(/(\d{2,3})\s*bpm/i); const hr2=h2?num(h2[1]):null;
+      // Conservative fallbacks for English-only OCR.
+      if(heartRate==null){ const m=clean.match(/(\d{2,3})\s*bpm/i); if(m) heartRate=num(m[1]); }
+      if(calories==null){ const m=clean.match(/([\d,]{2,6})\s*kcal/i); if(m) calories=num(m[1]); }
+      if(steps==null){ const m=clean.match(/([\d,]{3,8})\s*steps/i); if(m) steps=num(m[1]); }
+      if(elevation==null){ const m=clean.match(/([\d,]{1,6})\s*m\b/i); if(m) elevation=num(m[1]); }
 
-      const finalDistance = distance ?? distance2;
-      const finalPace = pace ?? pace2;
-      const finalHr = heartRate ?? hr2;
-
-      if(finalDistance == null && finalPace == null && finalHr == null && durationSec == null && calories == null && steps == null && elevation == null){
+      if(distance==null && pace==null && heartRate==null && durationSec==null && calories==null && steps==null && elevation==null){
         throw new Error('画像から数値を読み取れませんでした');
       }
 
-      inDistance.value = finalDistance ?? '';
-      inPace.value = finalPace ?? '';
-      inHr.value = finalHr ?? '';
-      inDuration.value = durationSec != null ? secondsToDuration(durationSec) : '';
+      inDistance.value = distance ?? '';
+      inPace.value = pace ?? '';
+      inHr.value = heartRate ?? '';
+      inDuration.value = durationSec!=null ? secondsToDuration(durationSec) : '';
       inDate.value = todayStr();
       inCalories.value = calories ?? '';
       inSteps.value = steps ?? '';
       inElevation.value = elevation ?? '';
-      inAerobic.value = '';
-      inAzm.value = '';
-      inMemo.value = '';
+      inAerobic.value=''; inAzm.value=''; inMemo.value='';
       confirmBlock.classList.add('show');
     }catch(err){
-      console.error('RUNLOG OCR error:', err);
-      errorTag.textContent = 'OCRの読み取りに失敗しました。ネット接続を確認して「もう一度OCRする」を押してください。';
-      if(ocrRetryBtn) ocrRetryBtn.style.display = 'block';
-      errorTag.style.display = 'block';
+      console.error('RUNLOG OCR error:',err);
+      errorTag.textContent='OCRの読み取りに失敗しました。ネット接続を確認して「もう一度OCRする」を押してください。';
+      if(ocrRetryBtn) ocrRetryBtn.style.display='block';
+      errorTag.style.display='block';
       [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
-      inDate.value = todayStr();
-      confirmBlock.classList.add('show');
+      inDate.value=todayStr(); confirmBlock.classList.add('show');
     }finally{
-      analyzingTag.style.display = 'none'; scanLine.style.display = 'none';
-      if(ocrRetryBtn) ocrRetryBtn.style.display = 'none';
+      if(worker){try{await worker.terminate();}catch(e){}}
+      analyzingTag.style.display='none'; scanLine.style.display='none';
+      if(ocrRetryBtn) ocrRetryBtn.style.display='none';
     }
   }
 
