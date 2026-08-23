@@ -183,7 +183,7 @@
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<meta name="runlog-ocr-build" content="2026-08-23-v8-accurate">
+<meta name="runlog-ocr-build" content="2026-08-23-v9-spatial">
 </head>
 <body>
 <div class="app-shell">
@@ -598,27 +598,22 @@
   }
 
   async function analyzeImage(){
-    analyzingTag.style.display = 'flex'; scanLine.style.display = 'block';
-    errorTag.style.display = 'none'; confirmBlock.classList.remove('show');
+    analyzingTag.style.display='flex'; scanLine.style.display='block';
+    errorTag.style.display='none'; confirmBlock.classList.remove('show');
     analyzingTag.innerHTML = '<span class="spinner"></span>OCRエンジンを準備中…';
 
     let worker = null;
     try{
       if(!window.Tesseract || typeof Tesseract.createWorker !== 'function') throw new Error('OCRライブラリを読み込めませんでした');
-
-      // Japanese + English: running screenshots commonly use Japanese labels.
-      // Everything is processed locally in the browser; no API key is required.
       worker = await Promise.race([
         Tesseract.createWorker('jpn+eng', 1, {
           workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
           langPath: 'https://tessdata.projectnaptha.com/4.0.0',
           corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0',
           logger: m => {
-            if(m && m.status === 'recognizing text' && typeof m.progress === 'number'){
+            if(m && m.status === 'recognizing text' && typeof m.progress === 'number')
               analyzingTag.innerHTML = `<span class="spinner"></span>画像を読み取り中… ${Math.round(m.progress*100)}%`;
-            } else if(m && m.status){
-              analyzingTag.innerHTML = `<span class="spinner"></span>${m.status}`;
-            }
+            else if(m && m.status) analyzingTag.innerHTML = `<span class="spinner"></span>${m.status}`;
           }
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('OCRエンジンの読み込みがタイムアウトしました')), 45000))
@@ -627,106 +622,159 @@
       const img = new Image();
       await new Promise((resolve,reject)=>{ img.onload=resolve; img.onerror=reject; img.src=previewImg.src; });
 
-      // Keep the original contrast. The old hard black/white threshold erased
-      // decimal points and commas (e.g. 4.15 -> 415), so we now use two passes.
-      const scale = Math.min(3, Math.max(1.8, 2200 / Math.max(img.width,1)));
-      const makeCanvas = (threshold=false) => {
+      // Upscale without cropping. A little more resolution helps small punctuation.
+      const scale = Math.min(4, Math.max(2.2, 2600 / Math.max(img.width,1)));
+      const makeCanvas = (mode) => {
         const c=document.createElement('canvas');
         c.width=Math.round(img.width*scale); c.height=Math.round(img.height*scale);
         const x=c.getContext('2d',{willReadFrequently:true});
         x.imageSmoothingEnabled=true; x.drawImage(img,0,0,c.width,c.height);
-        if(threshold){
+        if(mode==='threshold'){
           const d=x.getImageData(0,0,c.width,c.height);
           for(let i=0;i<d.data.length;i+=4){
             const y=0.299*d.data[i]+0.587*d.data[i+1]+0.114*d.data[i+2];
-            const v=y>115?255:0; d.data[i]=d.data[i+1]=d.data[i+2]=v;
+            const v=y>125?255:0; d.data[i]=d.data[i+1]=d.data[i+2]=v;
           }
           x.putImageData(d,0,0);
+        } else if(mode==='contrast'){
+          x.filter='contrast(1.35) brightness(1.05)';
+          x.drawImage(img,0,0,c.width,c.height);
         }
         return c;
       };
 
       analyzingTag.innerHTML='<span class="spinner"></span>数字と項目名を確認中…';
-      const pass1 = await worker.recognize(makeCanvas(false), {rotateAuto:true});
-      const text1 = pass1?.data?.text || '';
-      // A second high-contrast pass helps dark screenshots while the first pass
-      // preserves punctuation such as decimal points and commas.
-      const pass2 = await worker.recognize(makeCanvas(true), {rotateAuto:true});
-      const text2 = pass2?.data?.text || '';
+      const passes=[];
+      for(const mode of ['normal','contrast','threshold']){
+        const r=await worker.recognize(makeCanvas(mode), {rotateAuto:true});
+        passes.push(r);
+      }
       await worker.terminate(); worker=null;
 
-      const rawText = [text1,text2].filter(Boolean).join('\n');
-      if(!rawText.trim()) throw new Error('OCR結果が空でした');
-      const clean = rawText
+      const cleanText = passes.map(p=>p?.data?.text||'').join('\n')
         .replace(/[，、]/g, ',').replace(/[：]/g, ':')
         .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"')
         .replace(/[‐‑–—]/g,'-');
+      if(!cleanText.trim()) throw new Error('OCR結果が空でした');
 
       const num = s => Number(String(s).replace(/,/g,''));
-      const norm = s => String(s).replace(/[,，]/g,'').trim();
-      const labeled = (labels, pattern, source=clean) => {
-        const re = new RegExp(`(?:${labels})(?:[^0-9]{0,80})(${pattern})`, 'iu');
-        const m=source.match(re); return m?m[1]:null;
+      const norm = s => String(s||'').toLowerCase()
+        .replace(/[，,]/g,'').replace(/[：:]/g,'').replace(/[\s\u3000]/g,'')
+        .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"');
+
+      // --- Spatial OCR parser -------------------------------------------------
+      // Tesseract sometimes reads a value correctly but associates it with the
+      // wrong field when we parse the whole text as one regex. We therefore use
+      // word bounding boxes: find a label first, then choose the closest numeric
+      // value to the right/below that label. This is much safer for Strava-style
+      // screenshots where distance/pace/HR/time/steps are stacked vertically.
+      const wordSets = passes.map(p=>p?.data?.words||[]).filter(a=>a.length);
+      const words=[];
+      for(const set of wordSets){
+        for(const w of set){
+          const text=String(w.text||'').trim();
+          if(!text) continue;
+          const b=w.bbox||{};
+          const x0=Number(b.x0)||0, y0=Number(b.y0)||0, x1=Number(b.x1)||x0, y1=Number(b.y1)||y0;
+          const conf=Number(w.confidence);
+          words.push({text,x:(x0+x1)/2,y:(y0+y1)/2,x0,y0,x1,y1,conf:Number.isFinite(conf)?conf:0});
+        }
+      }
+
+      const labelGroups={
+        distance:['距離','総距離','distance','kilometers','km'],
+        pace:['平均ペース','ペース','pace','min/km','/km'],
+        hr:['平均心拍数','心拍数','heart rate','heartrate','bpm'],
+        duration:['時間','経過時間','time','duration'],
+        steps:['歩数','総歩数','steps','step count']
       };
-      const labeledEither = (labels, pattern, source=clean) => {
-        let v=labeled(labels,pattern,source);
-        if(v) return v;
-        const re = new RegExp(`(${pattern})(?:[^0-9]{0,80})(?:${labels})`, 'iu');
-        const m=source.match(re); return m?m[1]:null;
+      const labelHit=(w, key)=>{
+        const t=norm(w.text);
+        return labelGroups[key].some(q=>t.includes(norm(q)) || norm(q).includes(t) && t.length>=2);
+      };
+      const labels={};
+      for(const key of Object.keys(labelGroups)){
+        labels[key]=words.filter(w=>labelHit(w,key));
+      }
+
+      const allText=cleanText;
+      const nearbyWords=(key)=>{
+        const ls=labels[key]; if(!ls.length) return [];
+        const out=[];
+        for(const l of ls){
+          for(const w of words){
+            if(w===l) continue;
+            const dx=w.x-l.x, dy=w.y-l.y;
+            // Values are normally to the right or below the label. Keep a
+            // generous vertical window because OCR can split a visual row.
+            if((dx>=-40 && dx<=1500 && Math.abs(dy)<=900) || (Math.abs(dx)<=1000 && dy>=-80 && dy<=1100)){
+              const dist=Math.hypot(Math.max(0,dx), Math.max(0,dy))*0.7 + Math.abs(dy)*0.3;
+              out.push({w,dist});
+            }
+          }
+        }
+        return out.sort((a,b)=>a.dist-b.dist).map(o=>o.w);
+      };
+      const extractNearby=(key, regex)=>{
+        for(const w of nearbyWords(key)){
+          const m=String(w.text).match(regex); if(m) return m[1]||m[0];
+        }
+        // Try the text of nearby words together; this catches 5'17" and 25:44
+        // when punctuation was split into separate OCR tokens.
+        const ns=nearbyWords(key).slice(0,12).map(w=>w.text).join(' ')
+          .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"');
+        const m=ns.match(regex); return m?(m[1]||m[0]):null;
       };
 
-      // Distance: preserve decimals. If OCR drops the decimal point, recover it
-      // only when the value is clearly a 3- or 4-digit distance candidate.
-      let dv=labeledEither('距離|総距離|distance', '(\\d+(?:\\.\\d+)?)\\s*(?:km|ＫＭ|ｋｍ)?');
-      let distance = dv ? num(dv) : null;
-      if(distance!=null && distance>=100 && distance<10000) distance=Math.round((distance/100)*100)/100;
+      // First use spatially associated values.
+      let distance=null, pace=null, heartRate=null, durationSec=null, steps=null;
+      let dv=extractNearby('distance','(\d+(?:[\.,]\d+)?)');
+      if(dv){ distance=num(dv.replace(',','.')); if(distance>100 && distance<10000) distance=distance/100; }
+      let pv=extractNearby('pace','(\d{1,2})\s*[:\']\s*(\d{2})');
+      if(pv){ const m=String(pv).match(/(\d{1,2})\s*[:\']\s*(\d{2})/); if(m) pace=`${m[1]}'${m[2]}"`; }
+      let hv=extractNearby('hr','(\d{2,3})');
+      if(hv){ const n=num(hv); if(n>=35 && n<=230) heartRate=n; }
+      let tv=extractNearby('duration','(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)');
+      if(tv){ const m=String(tv).match(/(\d{1,2})\s*[:：]\s*(\d{2})/); if(m) durationSec=Number(m[1])*60+Number(m[2]); }
+      let sv=extractNearby('steps','([\d,]{3,8})');
+      if(sv){ const n=num(sv); if(n>=100 && n<=100000) steps=n; }
+
+      // Strong fallbacks based on the user's running-card layout. These are
+      // intentionally conservative so one bad OCR token cannot populate the
+      // wrong field.
       if(distance==null){
-        const m=clean.match(/(\d+(?:\.\d+)?)\s*(?:km|ＫＭ|ｋｍ)/i);
-        if(m) distance=num(m[1]);
+        const ms=[...allText.matchAll(/(\d+\.\d+)\s*(?:km|ＫＭ|ｋｍ)/gi)].map(m=>num(m[1]));
+        distance=ms.find(n=>n>0 && n<100) ?? null;
+      }
+      if(pace==null){
+        const ms=[...allText.matchAll(/(\d{1,2})\s*[:']\s*(\d{2})\s*(?:"|”)?\s*(?:\/\s*km)?/gi)];
+        const hit=ms.find(m=>Number(m[1])>=3 && Number(m[1])<=12 && Number(m[2])<60);
+        if(hit) pace=`${hit[1]}'${hit[2]}"`;
+      }
+      if(heartRate==null){
+        const m=allText.match(/(\d{2,3})\s*bpm/i); if(m) heartRate=num(m[1]);
+      }
+      if(durationSec==null){
+        const ms=[...allText.matchAll(/(\d{1,2}):\s*(\d{2})/g)];
+        const hit=ms.find(m=>Number(m[2])<60 && Number(m[1])<24);
+        if(hit) durationSec=Number(hit[1])*60+Number(hit[2]);
+      }
+      if(steps==null){
+        const ms=[...allText.matchAll(/([\d,]{3,8})/g)].map(m=>num(m[1])).filter(n=>n>=1000 && n<=100000);
+        // Prefer a 4-digit step count over obviously smaller HR/time numbers.
+        if(ms.length) steps=ms.find(n=>n>=2000) ?? ms[0];
       }
 
-      // Pace: prefer a value next to a pace label, otherwise a mm:ss-like value.
-      let pv=labeledEither('平均\\s*ペース|ペース|pace', '(\\d{1,2})\\s*[:\']\\s*(\\d{2})');
-      if(!pv){
-        const m=clean.match(/(\d{1,2})\s*[:\']\s*(\d{2})\s*(?:"|”)?\s*(?:\/\s*(?:km|ＫＭ|ｋｍ))?/i);
-        pv=m?`${m[1]}:${m[2]}`:null;
-      }
-      const pace = pv ? (pv.includes(':') ? pv.replace(':',"'")+`"` : pv) : null;
-
-      // Duration: require a time label where possible so pace isn't mistaken for time.
-      let tv=labeledEither('時間|duration|time', '(\\d{1,2}):\\s*(\\d{2})(?::\\s*(\\d{2}))?');
-      let durationSec=null;
-      if(tv){ const a=tv.split(':').map(Number); durationSec=a.length===3?a[0]*3600+a[1]*60+a[2]:a[0]*60+a[1]; }
-
-      // Numeric fields use their Japanese/English labels first. This prevents a
-      // heart-rate number from being mistaken for calories or steps.
-      let hv=labeledEither('平均\\s*心拍数|心拍数|heart\\s*rate|bpm','(\\d{2,3})');
-      let heartRate=hv?num(hv):null;
-      let cv=labeledEither('消費\\s*カロリー|カロリー|calories|kcal','([\\d,]{2,6})');
-      let calories=cv?num(cv):null;
-      let sv=labeledEither('歩数|総歩数|steps','([\\d,]{3,8})');
-      let steps=sv?num(sv):null;
-      let ev=labeledEither('獲得\\s*標高|標高|elevation','([\\d,]{1,6})');
-      let elevation=ev?num(ev):null;
-
-      // Conservative fallbacks for English-only OCR.
-      if(heartRate==null){ const m=clean.match(/(\d{2,3})\s*bpm/i); if(m) heartRate=num(m[1]); }
-      if(calories==null){ const m=clean.match(/([\d,]{2,6})\s*kcal/i); if(m) calories=num(m[1]); }
-      if(steps==null){ const m=clean.match(/([\d,]{3,8})\s*steps/i); if(m) steps=num(m[1]); }
-      if(elevation==null){ const m=clean.match(/([\d,]{1,6})\s*m\b/i); if(m) elevation=num(m[1]); }
-
-      if(distance==null && pace==null && heartRate==null && durationSec==null && calories==null && steps==null && elevation==null){
-        throw new Error('画像から数値を読み取れませんでした');
-      }
-
-      inDistance.value = distance ?? '';
+      // For this Strava-style card, these five fields are the primary record.
+      // Do not silently invent missing values; leave them blank for correction.
+      inDistance.value = distance!=null ? distance.toFixed(2) : '';
       inPace.value = pace ?? '';
       inHr.value = heartRate ?? '';
       inDuration.value = durationSec!=null ? secondsToDuration(durationSec) : '';
       inDate.value = todayStr();
-      inCalories.value = calories ?? '';
+      inCalories.value = '';
       inSteps.value = steps ?? '';
-      inElevation.value = elevation ?? '';
+      inElevation.value = '';
       inAerobic.value=''; inAzm.value=''; inMemo.value='';
       confirmBlock.classList.add('show');
     }catch(err){

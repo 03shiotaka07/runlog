@@ -1,4 +1,4 @@
-const CACHE_NAME = 'runlog-v7';
+const CACHE_NAME = 'runlog-v9';
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', event => {
