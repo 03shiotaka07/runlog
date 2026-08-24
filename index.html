@@ -115,12 +115,6 @@
   .preview-wrap{ position:relative; border-radius:14px; overflow:hidden; }
   .preview-wrap img{ width:100%; display:block; max-height:min(70vh, 720px); height:auto; object-fit:contain; background:#05070d; }
   .preview-wrap .clear-btn{ position:absolute; top:8px; right:8px; background:rgba(10,15,26,0.75); color:var(--ink); border:1px solid var(--line); border-radius:8px; font-size:11px; padding:5px 9px; cursor:pointer; }
-  .scan-overlay{ position:absolute; left:0; right:0; height:2px; background:linear-gradient(90deg, transparent, var(--trace), transparent); animation: scan 1.6s linear infinite; box-shadow:0 0 12px var(--trace); }
-  @keyframes scan{ 0%{ top:0; } 100%{ top:100%; } }
-  .analyzing-tag{ margin-top:10px; font-size:12px; color:var(--trace); font-family:var(--font-mono); display:flex; align-items:center; gap:8px; }
-  .spinner{ width:12px; height:12px; border-radius:50%; border:2px solid rgba(86,224,194,0.25); border-top-color:var(--trace); animation:spin 0.8s linear infinite; }
-  @keyframes spin{ to{ transform:rotate(360deg); } }
-  .error-tag{ margin-top:10px; font-size:12px; color:var(--pulse); background:rgba(255,93,93,0.08); border:1px solid rgba(255,93,93,0.25); padding:8px 10px; border-radius:8px; }
   .preview-note{ margin-top:7px; font-size:10px; color:var(--ink-dim); text-align:center; }
 
   .confirm{ margin-top:14px; display:none; }
@@ -182,7 +176,6 @@
 
   ::selection{ background:rgba(86,224,194,0.3); }
 </style>
-<meta name="runlog-build" content="2026-08-23-v11-manual-entry">
 </head>
 <body>
 <div class="app-shell">
@@ -216,7 +209,7 @@
       </div>
 
       <div class="panel">
-        <div class="panel-title"><span class="dot"></span>画像を見ながら記録する</div>
+        <div class="panel-title"><span class="dot"></span>画像を見ながら記録を入力</div>
 
         <label id="dropzone" class="dropzone" for="fileInput">
           <input type="file" id="fileInput" accept="image/*" aria-label="画像を選択">
@@ -234,16 +227,13 @@
         <div id="previewArea" style="display:none;">
           <div class="preview-wrap">
             <img id="previewImg" src="" alt="preview">
-            <div id="scanLine" class="scan-overlay" style="display:none;"></div>
             <button class="clear-btn" id="clearBtn">✕ やり直す</button>
           </div>
-          <div class="preview-note">アップロードした画像を見ながら、下の項目を手入力してください。</div>
-          <div id="analyzingTag" class="analyzing-tag" style="display:none;"></div>
-          <div id="errorTag" class="error-tag" style="display:none;"></div>
-        </div>
+          <div class="preview-note">画像は記録の確認用です。表示された画像を見ながら下の項目を入力してください。</div>
+                  </div>
 
         <div class="confirm" id="confirmBlock">
-          <div class="confirm-note">画像を確認しながら、必要な項目を手入力して記録してください。<br><strong>OCRは使わず、入力した値をそのまま保存します。</strong></div>
+          <div class="confirm-note">画像を見ながら数値を入力して、「この内容で記録する」を押してください。</div>
           <div class="field-row">
             <div class="field dist"><label>距離 (km)</label><input type="number" step="0.01" id="inDistance" placeholder="例: 4.93"></div>
             <div class="field pace"><label>平均ペース (/km)</label><input type="text" id="inPace" placeholder="例: 7'34&quot;"></div>
@@ -316,9 +306,8 @@
   // ---------- element refs ----------
   const $ = id => document.getElementById(id);
   const dropzone = $('dropzone'), fileInput = $('fileInput'), previewArea = $('previewArea'), previewImg = $('previewImg');
-  const clearBtn = $('clearBtn'), scanLine = $('scanLine'), analyzingTag = $('analyzingTag'), errorTag = $('errorTag');
+  const clearBtn = $('clearBtn');
   const confirmBlock = $('confirmBlock');
-  const ocrRetryBtn = $('ocrRetryBtn');
   const inDistance = $('inDistance'), inPace = $('inPace'), inHr = $('inHr'), inDuration = $('inDuration'), inDate = $('inDate');
   const inCalories = $('inCalories'), inSteps = $('inSteps'), inElevation = $('inElevation'), inAerobic = $('inAerobic'), inAzm = $('inAzm'), inMemo = $('inMemo');
   const saveBtn = $('saveBtn'), cancelBtn = $('cancelBtn');
@@ -546,14 +535,11 @@
     if(btn) deleteRecord(Number(btn.dataset.id));
   });
 
-  // ---------- image capture ----------
+  // ---------- image attachment (manual entry) ----------
   let currentBase64 = null, currentMediaType = null;
 
   fileInput.addEventListener('change', (e)=>{ if(e.target.files && e.target.files[0]) handleFile(e.target.files[0]); });
-  // Android Chrome / PWAでタップが反応しない場合に備え、カード自体を明示的にファイル選択へ接続
-  dropzone.addEventListener('click', (e)=>{
-    if(e.target !== fileInput) fileInput.click();
-  });
+  dropzone.addEventListener('click', (e)=>{ if(e.target !== fileInput) fileInput.click(); });
   ['dragover','dragenter'].forEach(evt=> dropzone.addEventListener(evt, e=>{ e.preventDefault(); dropzone.classList.add('drag'); }));
   ['dragleave','drop'].forEach(evt=> dropzone.addEventListener(evt, e=>{ e.preventDefault(); dropzone.classList.remove('drag'); }));
   dropzone.addEventListener('drop', e=>{ const f=e.dataTransfer.files[0]; if(f) handleFile(f); });
@@ -579,14 +565,9 @@
       previewImg.src = dataUrl;
       dropzone.style.display = 'none';
       previewArea.style.display = 'block';
-      errorTag.style.display = 'none';
-      analyzingTag.style.display = 'none';
-      scanLine.style.display = 'none';
-      // v11: OCRを完全に廃止。画像を見ながら手入力する方式。
-      [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
-      inDate.value = todayStr();
       confirmBlock.classList.add('show');
-      inDistance.focus();
+      inDate.value = todayStr();
+      [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
     };
     reader.readAsDataURL(file);
   }
@@ -595,273 +576,12 @@
   cancelBtn.addEventListener('click', resetCapture);
   function resetCapture(){
     currentBase64 = null; currentMediaType = null; fileInput.value = '';
+    previewImg.src = '';
     previewArea.style.display = 'none'; dropzone.style.display = 'block';
-    confirmBlock.classList.remove('show'); errorTag.style.display = 'none'; scanLine.style.display = 'none';
+    confirmBlock.classList.remove('show');
     moreToggle.classList.remove('open'); moreFields.classList.remove('show');
-  }
-
-  async function analyzeImage(){
-    analyzingTag.style.display='flex'; scanLine.style.display='block';
-    errorTag.style.display='none'; confirmBlock.classList.remove('show');
-    analyzingTag.innerHTML = '<span class="spinner"></span>OCRエンジンを準備中…';
-
-    let worker = null;
-    try{
-      if(!window.Tesseract || typeof Tesseract.createWorker !== 'function') throw new Error('OCRライブラリを読み込めませんでした');
-      worker = await Promise.race([
-        Tesseract.createWorker('jpn+eng', 1, {
-          workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
-          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-          corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0',
-          logger: m => {
-            if(m && m.status === 'recognizing text' && typeof m.progress === 'number')
-              analyzingTag.innerHTML = `<span class="spinner"></span>画像を読み取り中… ${Math.round(m.progress*100)}%`;
-            else if(m && m.status) analyzingTag.innerHTML = `<span class="spinner"></span>${m.status}`;
-          }
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('OCRエンジンの読み込みがタイムアウトしました')), 45000))
-      ]);
-
-      const img = new Image();
-      await new Promise((resolve,reject)=>{ img.onload=resolve; img.onerror=reject; img.src=previewImg.src; });
-
-      // Upscale without cropping. A little more resolution helps small punctuation.
-      const scale = Math.min(4, Math.max(2.2, 2600 / Math.max(img.width,1)));
-      const makeCanvas = (mode) => {
-        const c=document.createElement('canvas');
-        c.width=Math.round(img.width*scale); c.height=Math.round(img.height*scale);
-        const x=c.getContext('2d',{willReadFrequently:true});
-        x.imageSmoothingEnabled=true; x.drawImage(img,0,0,c.width,c.height);
-        if(mode==='threshold'){
-          const d=x.getImageData(0,0,c.width,c.height);
-          for(let i=0;i<d.data.length;i+=4){
-            const y=0.299*d.data[i]+0.587*d.data[i+1]+0.114*d.data[i+2];
-            const v=y>125?255:0; d.data[i]=d.data[i+1]=d.data[i+2]=v;
-          }
-          x.putImageData(d,0,0);
-        } else if(mode==='contrast'){
-          x.filter='contrast(1.35) brightness(1.05)';
-          x.drawImage(img,0,0,c.width,c.height);
-        }
-        return c;
-      };
-
-      analyzingTag.innerHTML='<span class="spinner"></span>数字と項目名を確認中…';
-      const passes=[];
-      // Multiple page-segmentation modes are important for running screenshots:
-      // values such as 4.15, 6'12", 152 bpm, 25:44 and 4,204 are often arranged
-      // in separate visual blocks rather than one text paragraph.
-      for(const mode of ['normal','contrast','threshold']){
-        for(const psm of ['6','11']){
-          const r=await worker.recognize(makeCanvas(mode), {
-            rotateAuto:true,
-            config:{ tessedit_pageseg_mode: psm }
-          });
-          passes.push(r);
-        }
-      }
-      await worker.terminate(); worker=null;
-
-      const cleanText = passes.map(p=>p?.data?.text||'').join('\n')
-        .replace(/[，、]/g, ',').replace(/[：]/g, ':')
-        .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"')
-        .replace(/[‐‑–—]/g,'-');
-      if(!cleanText.trim()) throw new Error('OCR結果が空でした');
-
-      const num = s => Number(String(s).replace(/,/g,''));
-      const norm = s => String(s||'').toLowerCase()
-        .replace(/[，,]/g,'').replace(/[：:]/g,'').replace(/[\s\u3000]/g,'')
-        .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"');
-
-      // --- Spatial OCR parser -------------------------------------------------
-      // Tesseract sometimes reads a value correctly but associates it with the
-      // wrong field when we parse the whole text as one regex. We therefore use
-      // word bounding boxes: find a label first, then choose the closest numeric
-      // value to the right/below that label. This is much safer for Strava-style
-      // screenshots where distance/pace/HR/time/steps are stacked vertically.
-      const wordSets = passes.map(p=>p?.data?.words||[]).filter(a=>a.length);
-      const words=[];
-      for(const set of wordSets){
-        for(const w of set){
-          const text=String(w.text||'').trim();
-          if(!text) continue;
-          const b=w.bbox||{};
-          const x0=Number(b.x0)||0, y0=Number(b.y0)||0, x1=Number(b.x1)||x0, y1=Number(b.y1)||y0;
-          const conf=Number(w.confidence);
-          words.push({text,x:(x0+x1)/2,y:(y0+y1)/2,x0,y0,x1,y1,conf:Number.isFinite(conf)?conf:0});
-        }
-      }
-
-      const labelGroups={
-        distance:['距離','総距離','distance','kilometers','km'],
-        pace:['平均ペース','ペース','pace','min/km','/km'],
-        hr:['平均心拍数','心拍数','heart rate','heartrate','bpm'],
-        duration:['時間','経過時間','time','duration'],
-        steps:['歩数','総歩数','steps','step count']
-      };
-      const labelHit=(w, key)=>{
-        const t=norm(w.text);
-        return labelGroups[key].some(q=>t.includes(norm(q)) || norm(q).includes(t) && t.length>=2);
-      };
-      const labels={};
-      for(const key of Object.keys(labelGroups)){
-        labels[key]=words.filter(w=>labelHit(w,key));
-      }
-
-      const allText=cleanText;
-      const nearbyWords=(key)=>{
-        const ls=labels[key]; if(!ls.length) return [];
-        const out=[];
-        for(const l of ls){
-          for(const w of words){
-            if(w===l) continue;
-            const dx=w.x-l.x, dy=w.y-l.y;
-            // Values are normally to the right or below the label. Keep a
-            // generous vertical window because OCR can split a visual row.
-            if((dx>=-40 && dx<=1500 && Math.abs(dy)<=900) || (Math.abs(dx)<=1000 && dy>=-80 && dy<=1100)){
-              const dist=Math.hypot(Math.max(0,dx), Math.max(0,dy))*0.7 + Math.abs(dy)*0.3;
-              out.push({w,dist});
-            }
-          }
-        }
-        return out.sort((a,b)=>a.dist-b.dist).map(o=>o.w);
-      };
-      const extractNearby=(key, regex)=>{
-        for(const w of nearbyWords(key)){
-          const m=String(w.text).match(regex); if(m) return m[1]||m[0];
-        }
-        // Try the text of nearby words together; this catches 5'17" and 25:44
-        // when punctuation was split into separate OCR tokens.
-        const ns=nearbyWords(key).slice(0,12).map(w=>w.text).join(' ')
-          .replace(/[’‘′]/g,"'").replace(/[″”]/g,'"');
-        const m=ns.match(regex); return m?(m[1]||m[0]):null;
-      };
-
-      // First use spatially associated values.
-      let distance=null, pace=null, heartRate=null, durationSec=null, steps=null;
-      let dv=extractNearby('distance','(\d+(?:[\.,]\d+)?)');
-      if(dv){ distance=num(dv.replace(',','.')); if(distance>100 && distance<10000) distance=distance/100; }
-      let pv=extractNearby('pace','(\d{1,2})\s*[:\']\s*(\d{2})');
-      if(pv){ const m=String(pv).match(/(\d{1,2})\s*[:\']\s*(\d{2})/); if(m) pace=`${m[1]}'${m[2]}"`; }
-      let hv=extractNearby('hr','(\d{2,3})');
-      if(hv){ const n=num(hv); if(n>=35 && n<=230) heartRate=n; }
-      let tv=extractNearby('duration','(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)');
-      if(tv){ const m=String(tv).match(/(\d{1,2})\s*[:：]\s*(\d{2})/); if(m) durationSec=Number(m[1])*60+Number(m[2]); }
-      let sv=extractNearby('steps','([\d,]{3,8})');
-      if(sv){ const n=num(sv); if(n>=100 && n<=100000) steps=n; }
-
-      // Strong fallbacks based on the user's running-card layout. These are
-      // intentionally conservative so one bad OCR token cannot populate the
-      // wrong field.
-      if(distance==null){
-        const ms=[...allText.matchAll(/(\d+\.\d+)\s*(?:km|ＫＭ|ｋｍ)/gi)].map(m=>num(m[1]));
-        distance=ms.find(n=>n>0 && n<100) ?? null;
-      }
-      if(pace==null){
-        const ms=[...allText.matchAll(/(\d{1,2})\s*[:']\s*(\d{2})\s*(?:"|”)?\s*(?:\/\s*km)?/gi)];
-        const hit=ms.find(m=>Number(m[1])>=3 && Number(m[1])<=12 && Number(m[2])<60);
-        if(hit) pace=`${hit[1]}'${hit[2]}"`;
-      }
-      if(heartRate==null){
-        const m=allText.match(/(\d{2,3})\s*bpm/i); if(m) heartRate=num(m[1]);
-      }
-      if(durationSec==null){
-        const ms=[...allText.matchAll(/(\d{1,2}):\s*(\d{2})/g)];
-        const hit=ms.find(m=>Number(m[2])<60 && Number(m[1])<24);
-        if(hit) durationSec=Number(hit[1])*60+Number(hit[2]);
-      }
-      if(steps==null){
-        const ms=[...allText.matchAll(/([\d,]{3,8})/g)].map(m=>num(m[1])).filter(n=>n>=1000 && n<=100000);
-        // Prefer a 4-digit step count over obviously smaller HR/time numbers.
-        if(ms.length) steps=ms.find(n=>n>=2000) ?? ms[0];
-      }
-
-      // --- Candidate-based correction ---------------------------------------
-      // If the spatial pass attached a nearby number to the wrong label, use the
-      // complete OCR text as a second opinion. This is deliberately constrained
-      // to realistic running values, so 4.15 is not turned into 415 and HR 152
-      // is not confused with steps.
-      const ocr = cleanText.replace(/ /g,' ');
-      const paceCandidates=[];
-      for(const m of ocr.matchAll(/\b(\d{1,2})\s*(?:[:']|[′])\s*(\d{2})\s*(?:["″”])?\s*(?:\/\s*km)?/gi)){
-        const mm=Number(m[1]), ss=Number(m[2]);
-        if(mm>=3 && mm<=12 && ss<60) paceCandidates.push({mm,ss});
-      }
-      const durationCandidates=[];
-      for(const m of ocr.matchAll(/\b(\d{1,2})\s*[:：]\s*(\d{2})\b/g)){
-        const mm=Number(m[1]), ss=Number(m[2]);
-        if(mm>=10 && mm<=180 && ss<60) durationCandidates.push({mm,ss});
-      }
-      const distanceCandidates=[];
-      for(const m of ocr.matchAll(/\b(\d{1,3})[\.,](\d{1,2})\b/g)){
-        const n=Number(`${m[1]}.${m[2]}`);
-        if(n>0 && n<100) distanceCandidates.push(n);
-      }
-      // OCR often drops the decimal point from a running distance (4.15 -> 415).
-      for(const m of ocr.matchAll(/\b(\d{3,4})\s*(?:km|ＫＭ|ｋｍ)\b/gi)){
-        const raw=m[1];
-        const n=Number(raw);
-        if(n>=100 && n<10000){
-          const d=Number(`${raw.slice(0,-2)}.${raw.slice(-2)}`);
-          if(d>0 && d<100) distanceCandidates.push(d);
-        }
-      }
-      const hrCandidates=[];
-      for(const m of ocr.matchAll(/\b(\d{2,3})\s*(?:bpm|ＢＰＭ)\b/gi)){
-        const n=Number(m[1]); if(n>=80 && n<=220) hrCandidates.push(n);
-      }
-      // If bpm itself was lost, use plausible 3-digit HR values, but only when
-      // there is no stronger bpm-tagged candidate.
-      if(!hrCandidates.length){
-        for(const m of ocr.matchAll(/\b(1\d{2}|20\d|21\d|22\d)\b/g)){
-          const n=Number(m[1]); if(n>=80 && n<=220) hrCandidates.push(n);
-        }
-      }
-      const stepCandidates=[];
-      for(const m of ocr.matchAll(/\b([1-9]\d{3,5})\b/g)){
-        const n=Number(m[1]); if(n>=1000 && n<=100000) stepCandidates.push(n);
-      }
-      for(const m of ocr.matchAll(/\b([1-9]\d{0,2}(?:[,，]\d{3})+)\b/g)){
-        const n=Number(m[1].replace(/[,，]/g,'')); if(n>=1000 && n<=100000) stepCandidates.push(n);
-      }
-
-      // Prefer candidates that agree with the expected Strava-style layout.
-      if(distanceCandidates.length) distance=distanceCandidates.find(n=>Math.abs(n-4.15)<0.2) ?? distanceCandidates[0];
-      if(paceCandidates.length){
-        const hit=paceCandidates.find(x=>x.mm===6 && x.ss===12) ?? paceCandidates[0];
-        pace=`${hit.mm}'${String(hit.ss).padStart(2,'0')}"`;
-      }
-      if(hrCandidates.length) heartRate=hrCandidates.find(n=>n===152) ?? hrCandidates[0];
-      if(durationCandidates.length){
-        const hit=durationCandidates.find(x=>x.mm===25 && x.ss===44) ?? durationCandidates.sort((a,b)=>(b.mm*60+b.ss)-(a.mm*60+a.ss))[0];
-        durationSec=hit.mm*60+hit.ss;
-      }
-      if(stepCandidates.length) steps=stepCandidates.find(n=>n===4204) ?? Math.max(...stepCandidates);
-
-      // For this Strava-style card, these five fields are the primary record.
-      // Do not silently invent missing values; leave them blank for correction.
-      inDistance.value = distance!=null ? distance.toFixed(2) : '';
-      inPace.value = pace ?? '';
-      inHr.value = heartRate ?? '';
-      inDuration.value = durationSec!=null ? secondsToDuration(durationSec) : '';
-      inDate.value = todayStr();
-      inCalories.value = '';
-      inSteps.value = steps ?? '';
-      inElevation.value = '';
-      inAerobic.value=''; inAzm.value=''; inMemo.value='';
-      confirmBlock.classList.add('show');
-    }catch(err){
-      console.error('RUNLOG OCR error:',err);
-      errorTag.textContent='OCRの読み取りに失敗しました。ネット接続を確認して「もう一度OCRする」を押してください。';
-      if(ocrRetryBtn) ocrRetryBtn.style.display='block';
-      errorTag.style.display='block';
-      [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
-      inDate.value=todayStr(); confirmBlock.classList.add('show');
-    }finally{
-      if(worker){try{await worker.terminate();}catch(e){}}
-      analyzingTag.style.display='none'; scanLine.style.display='none';
-      if(ocrRetryBtn) ocrRetryBtn.style.display='none';
-    }
+    [inDistance,inPace,inHr,inDuration,inCalories,inSteps,inElevation,inAerobic,inAzm,inMemo].forEach(el=>el.value='');
+    inDate.value=todayStr();
   }
 
   saveBtn.addEventListener('click', async ()=>{
